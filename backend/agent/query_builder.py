@@ -53,7 +53,12 @@ def build_query(intent: dict) -> QueryResult:
         params.append(tag)
 
     elif tf_type == "date_range":
-        where_clauses.append("DateTime >= ? AND DateTime <= ?")
+        # Cast to DATE so a single-day query (start=end=2026-05-08)
+        # captures all timestamps throughout that day (00:00 to 23:59).
+        where_clauses.append(
+            "CAST(DateTime AS DATE) >= CAST(? AS DATE) "
+            "AND CAST(DateTime AS DATE) <= CAST(? AS DATE)"
+        )
         params += [tf["start"], tf["end"]]
 
     # For "latest" tf_type, no extra filter — we ORDER + LIMIT below
@@ -118,14 +123,25 @@ def build_query(intent: dict) -> QueryResult:
         desc = f"Maximum value for {tag}"
 
     elif agg == "trend":
-        sql = f"""
-            SELECT TagName, DateTime, Value
-            FROM hist
-            WHERE {where_sql}
-            ORDER BY DateTime DESC
-            LIMIT 20
-        """.strip()
-        desc = f"Recent trend (last 20 readings) for {tag}"
+        # When a date_range filter is present, return ALL readings for that day/range.
+        # Without a date_range, fall back to the last 50 readings.
+        if tf_type == "date_range":
+            sql = f"""
+                SELECT TagName, DateTime, Value
+                FROM hist
+                WHERE {where_sql}
+                ORDER BY DateTime ASC
+            """.strip()
+            desc = f"All readings for {tag} in selected date range"
+        else:
+            sql = f"""
+                SELECT TagName, DateTime, Value
+                FROM hist
+                WHERE {where_sql}
+                ORDER BY DateTime DESC
+                LIMIT 50
+            """.strip()
+            desc = f"Recent trend (last 50 readings) for {tag}"
 
     elif agg == "count_records":
         sql = f"""

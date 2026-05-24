@@ -130,16 +130,28 @@ Return this exact JSON structure:
   }
 }
 
-Rules:
-- intent=latest when user says "current", "now", "today", "what is", "count at"
-- intent=average when user says "average", "mean", "typical"
-- intent=trend when user says "trend", "history", "over time", "last readings"
-- intent=max when user says "peak", "highest", "maximum"
-- intent=min when user says "lowest", "minimum"
-- time_filter.type=latest for most "current" questions
-- time_filter.type=last_n + n=24 for "last 24 hours", "today"
-- Return ONLY the JSON object. No explanation. No markdown.
-"""
+Rules for intent:
+- intent=latest   → user says "current", "now", "what is", "count at" (no specific date)
+- intent=trend    → user says "trend", "history", "over time", "last readings", OR asks about a specific past date/range
+- intent=average  → user says "average", "mean", "typical"
+- intent=max      → user says "peak", "highest", "maximum"
+- intent=min      → user says "lowest", "minimum"
+- intent=count_records → user says "how many readings", "how many records", "how many updates"
+
+Rules for time_filter:
+- type=latest   → no date mentioned, user wants the most recent value right now
+- type=last_n   → user says "last 24 hours", "past N hours" → set n = number of hours
+- type=date_range → user mentions a specific date ("on 8 May", "in May 8", "8/5/2026") → set start AND end to that same date in YYYY-MM-DD format
+- type=date_range → user mentions a date range ("from X to Y", "between X and Y") → set start and end accordingly
+- type=all      → user says "all time", "entire dataset", "overall"
+
+Critical: If the user asks about a SPECIFIC DATE (even a single day), ALWAYS use:
+  time_filter.type = "date_range"
+  time_filter.start = "YYYY-MM-DD" (the date)
+  time_filter.end   = "YYYY-MM-DD" (the same date for single-day queries)
+  intent = "trend" (to return all readings for that day)
+
+Return ONLY the JSON object. No explanation. No markdown."""
 
 def node_nl_understanding(state: AgentState) -> dict:
     """Node 1: Use Qwen to extract structured intent from the user question."""

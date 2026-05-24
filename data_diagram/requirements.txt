@@ -1,0 +1,21 @@
+# Smart City Agent — Python dependencies
+
+# Core agent framework
+langgraph>=0.2.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+
+# LLM backends (install the one that matches your setup)
+langchain-ollama>=0.2.0      # for Qwen via Ollama  (recommended)
+# langchain-openai>=0.2.0   # uncomment for vLLM OpenAI-compatible endpoint
+
+# Data layer
+duckdb>=1.0.0
+pandas>=2.0.0
+
+# Fuzzy tag matching
+rapidfuzz>=3.0.0
+
+# Optional: for the REST API wrapper
+# fastapi>=0.110.0
+# uvicorn>=0.29.0

@@ -29,9 +29,9 @@ from langgraph.graph import StateGraph, END
 
 # ── Internal modules ────────────────────────────────────────────────
 from agent.tag_resolver   import resolve_tag, resolve_domain_tags, tag_label
-from agent.query_builder  import build_query, build_comparison_query
+from agent.query_builder  import build_query, build_comparison_query, build_domain_summary_query
 from agent.data_loader    import get_connection
-from config.tag_registry  import TAG_LABELS
+from config.tag_registry  import TAG_LABELS, DOMAIN_TAGS
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -46,7 +46,8 @@ class AgentState(TypedDict):
     extracted_intent: dict          # {"intent": "...", "location": "...", "time_filter": {...}}
 
     # Node 2 output
-    resolved_tag: str | None        # exact TagName or None
+    resolved_tag: str | None        # exact TagName, "__domain__X", or None
+    domain_tags: list[str]          # populated when resolved_tag is a domain
     resolver_confidence: float
     resolver_error: str | None
 
@@ -120,10 +121,10 @@ Available data domains:
 
 Return this exact JSON structure:
 {
-  "intent": "<latest|average|sum|min|max|trend|count_records>",
-  "location": "<extracted location or asset name, e.g. 'Beaches VIP', 'disabled cameras'>",
+  "intent": "<latest|average|sum|min|max|trend|count_records|summary>",
+  "location": "<extracted location, asset name, or domain name>",
   "time_filter": {
-    "type": "<latest|last_n|date_range|all>",
+    "type": "<latest|last_n|last_month|date_range|all>",
     "n": <number of hours if last_n, else null>,
     "start": "<YYYY-MM-DD if date_range, else null>",
     "end": "<YYYY-MM-DD if date_range, else null>"
@@ -131,27 +132,30 @@ Return this exact JSON structure:
 }
 
 Rules for intent:
-- intent=latest   → user says "current", "now", "what is", "count at" (no specific date)
-- intent=trend    → user says "trend", "history", "over time", "last readings", OR asks about a specific past date/range
-- intent=average  → user says "average", "mean", "typical"
-- intent=max      → user says "peak", "highest", "maximum"
-- intent=min      → user says "lowest", "minimum"
+- intent=latest        → user asks about current/now value of a specific sensor
+- intent=summary       → user says "summarize", "overview", "status report", OR asks about a whole domain (CCTV, gates, access control)
+- intent=trend         → user says "trend", "history", "over time", OR asks about a specific past date
+- intent=average       → user says "average", "mean", "typical"
+- intent=max           → user says "peak", "highest", "maximum"
+- intent=min           → user says "lowest", "minimum"
 - intent=count_records → user says "how many readings", "how many records", "how many updates"
 
+Rules for location:
+- For single-sensor questions: extract the specific sensor name (e.g. "Beaches VIP", "disabled cameras")
+- For domain questions: extract the domain name only (e.g. "CCTV", "access control", "gates")
+
 Rules for time_filter:
-- type=latest   → no date mentioned, user wants the most recent value right now
-- type=last_n   → user says "last 24 hours", "past N hours" → set n = number of hours
-- type=date_range → user mentions a specific date ("on 8 May", "in May 8", "8/5/2026") → set start AND end to that same date in YYYY-MM-DD format
-- type=date_range → user mentions a date range ("from X to Y", "between X and Y") → set start and end accordingly
-- type=all      → user says "all time", "entire dataset", "overall"
+- type=latest     → no date mentioned, user wants the current value
+- type=last_month → user says "last month", "previous month", "past month"
+- type=last_n     → user says "last N hours", "past N hours" → set n=hours
+- type=date_range → user mentions a specific date or range → set start and end in YYYY-MM-DD
+- type=all        → user says "all time", "entire dataset", "overall"
 
-Critical: If the user asks about a SPECIFIC DATE (even a single day), ALWAYS use:
-  time_filter.type = "date_range"
-  time_filter.start = "YYYY-MM-DD" (the date)
-  time_filter.end   = "YYYY-MM-DD" (the same date for single-day queries)
-  intent = "trend" (to return all readings for that day)
-
-Return ONLY the JSON object. No explanation. No markdown."""
+Critical rules:
+- If user mentions a SPECIFIC DATE: time_filter.type="date_range", intent="trend"
+- If user asks to SUMMARIZE a whole domain: intent="summary", location=domain name only
+- If user says "last month": time_filter.type="last_month" (NOT date_range)
+- Return ONLY the JSON object. No explanation. No markdown."""
 
 def node_nl_understanding(state: AgentState) -> dict:
     """Node 1: Use Qwen to extract structured intent from the user question."""
@@ -189,13 +193,26 @@ def node_nl_understanding(state: AgentState) -> dict:
 # ════════════════════════════════════════════════════════════════════
 
 def node_tag_resolver(state: AgentState) -> dict:
-    """Node 2: Deterministic fuzzy match from location string → TagName."""
+    """Node 2: Detect domain vs single-tag and resolve accordingly."""
     location = state["extracted_intent"].get("location", "")
     tag, confidence = resolve_tag(location)
+
+    # Check if it resolved to a domain sentinel
+    if tag and tag.startswith("__domain__"):
+        domain_name = tag.replace("__domain__", "")
+        tags_in_domain = DOMAIN_TAGS.get(domain_name, [])
+        if tags_in_domain:
+            return {
+                "resolved_tag": tag,          # keep sentinel for routing
+                "domain_tags": tags_in_domain,
+                "resolver_confidence": 100.0,
+                "resolver_error": None,
+            }
 
     if tag is None:
         return {
             "resolved_tag": None,
+            "domain_tags": [],
             "resolver_confidence": 0.0,
             "resolver_error": (
                 f"Could not resolve '{location}' to a known tag. "
@@ -205,6 +222,7 @@ def node_tag_resolver(state: AgentState) -> dict:
 
     return {
         "resolved_tag": tag,
+        "domain_tags": [],
         "resolver_confidence": confidence,
         "resolver_error": None,
     }
@@ -215,7 +233,7 @@ def node_tag_resolver(state: AgentState) -> dict:
 # ════════════════════════════════════════════════════════════════════
 
 def node_query_builder(state: AgentState) -> dict:
-    """Node 3: Build DuckDB SQL from resolved tag + intent. No LLM."""
+    """Node 3: Build DuckDB SQL — routes to domain summary or single-tag query."""
     if state.get("resolver_error"):
         return {
             "query_sql": "",
@@ -223,12 +241,26 @@ def node_query_builder(state: AgentState) -> dict:
             "query_description": "No query — tag resolution failed.",
         }
 
+    intent = state["extracted_intent"].get("intent", "latest")
+    tf     = state["extracted_intent"].get("time_filter", {"type": "latest"})
+
+    # ── Domain summary path ──────────────────────────────────────
+    domain_tags = state.get("domain_tags", [])
+    if domain_tags or intent == "summary":
+        tags = domain_tags or [state["resolved_tag"]]
+        qr = build_domain_summary_query(tags, tf)
+        return {
+            "query_sql": qr.sql,
+            "query_params": qr.params,
+            "query_description": qr.description,
+        }
+
+    # ── Single-tag path ──────────────────────────────────────────
     intent_dict = {
         **state["extracted_intent"],
         "tag_name": state["resolved_tag"],
     }
     qr = build_query(intent_dict)
-
     return {
         "query_sql": qr.sql,
         "query_params": qr.params,
@@ -369,6 +401,7 @@ def ask(question: str, data_dir: Path | None = None) -> str:
         "user_question":      question,
         "extracted_intent":   {},
         "resolved_tag":       None,
+        "domain_tags":        [],
         "resolver_confidence": 0.0,
         "resolver_error":     None,
         "query_sql":          "",
@@ -394,6 +427,7 @@ async def ask_streaming(question: str) -> AsyncIterator[dict]:
         "user_question":      question,
         "extracted_intent":   {},
         "resolved_tag":       None,
+        "domain_tags":        [],
         "resolver_confidence": 0.0,
         "resolver_error":     None,
         "query_sql":          "",

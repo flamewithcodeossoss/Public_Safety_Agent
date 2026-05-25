@@ -80,8 +80,8 @@ def _get_llm():
     # ── Option A: Ollama (default — Docker or local) ────────────
     try:
         from langchain_ollama import ChatOllama
-        model = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.145:11434")
+        model = os.getenv("OLLAMA_MODEL", "qwen3:30b")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
         return ChatOllama(model=model, base_url=base_url, temperature=0)
     except ImportError:
         pass

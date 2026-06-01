@@ -68,10 +68,14 @@ class AgentState(TypedDict):
 # LLM SETUP  — Qwen via Ollama (Docker service)
 # ════════════════════════════════════════════════════════════════════
 
-def _get_llm():
+# Stop tokens for SQL generation — cuts output as soon as the SQL ends
+_SQL_STOP = [";", "```", "\n\n"]
+
+
+def _get_llm(**kwargs):
     """
     Returns a LangChain-compatible chat LLM.
-    Configured for Ollama (Qwen) by default.
+    Pass extra kwargs (e.g. stop=[...]) to override defaults.
 
     Environment variables:
         OLLAMA_MODEL    = "RogerBen/qwen3.5-35b-opus-distill:latest"  (default)
@@ -82,11 +86,12 @@ def _get_llm():
         from langchain_ollama import ChatOllama
         model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
-        return ChatOllama(model=model, base_url=base_url, temperature=0)
+        return ChatOllama(model=model, base_url=base_url, temperature=0, **kwargs)
     except ImportError:
         pass
 
     # ── Option B: vLLM / OpenAI-compatible endpoint ─────────────
+    #    For best latency, launch vLLM with --enable-prefix-caching
     try:
         from langchain_openai import ChatOpenAI
         base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
@@ -96,6 +101,7 @@ def _get_llm():
             base_url=base_url,
             api_key="EMPTY",           # vLLM doesn't need a real key
             temperature=0,
+            **kwargs,
         )
     except ImportError:
         pass
@@ -105,6 +111,11 @@ def _get_llm():
         "  pip install langchain-ollama   # for Ollama\n"
         "  pip install langchain-openai   # for vLLM"
     )
+
+
+def _get_sql_llm():
+    """LLM tuned for SQL generation — includes stop sequences to cut latency."""
+    return _get_llm(stop=_SQL_STOP)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -252,71 +263,40 @@ def node_tag_resolver(state: AgentState) -> dict:
 # NODE 3 — QUERY BUILDER  (LLM-powered: Qwen generates DuckDB SQL)
 # ════════════════════════════════════════════════════════════════════
 
-_SQL_GEN_SYSTEM = """You are a DuckDB SQL expert for a Smart City monitoring system.
-Given a user's intent, a resolved sensor tag, and the database schema, write a single DuckDB SQL query.
+_SQL_GEN_SYSTEM = """You are a DuckDB SQL expert. Write ONE query against table `hist`.
 
-## Database Schema
+Schema: hist(TagName VARCHAR, DateTime TIMESTAMP, Value INTEGER, vValue INTEGER, StartDateTime TIMESTAMP)
 
-Table: `hist`
-Columns:
-  - TagName       VARCHAR    — sensor identifier (e.g. 'MRS_CCTV.Total_enabled_cameras')
-  - DateTime      TIMESTAMP  — when the reading was recorded
-  - Value         INTEGER    — the numeric sensor reading (may be NULL)
-  - vValue        INTEGER    — secondary numeric value (may be NULL)
-  - StartDateTime TIMESTAMP  — start time of the reading interval
+DuckDB notes:
+- Time offsets: INTERVAL '24 hours'. Date compare: CAST(x AS DATE). Last month: date_trunc('month', current_date) - INTERVAL '1 month'.
+- Always include WHERE Value IS NOT NULL.
+- Inline all values as literals (no ? placeholders).
 
-## Available TagNames and their human labels:
-- MRS_Access_Control.AccessChannels_QR   → "Access Channels (QR)"
-- MRS_Access_Control.Beaches_Vip         → "Beaches VIP Access Point"
-- MRS_Access_Control.MainGate_Vip        → "Main Gate VIP Access Point"
-- MRS_CCTV.cameras_total_number          → "Total CCTV Cameras"
-- MRS_CCTV.Total_disabled_cameras        → "Disabled CCTV Cameras"
-- MRS_CCTV.Total_enabled_cameras         → "Enabled CCTV Cameras"
-- MRS_Gate_APIs.Gates.Fail               → "Gate API Failures"
-- MRS_Gate_APIs.Gates.Success            → "Gate API Successes"
-
-## DuckDB-specific syntax notes:
-- Use INTERVAL for time offsets: `INTERVAL '24 hours'`, `INTERVAL '7 days'`
-- Use CAST(x AS DATE) for date comparisons
-- Use QUALIFY ROW_NUMBER() OVER (...) for top-N per group
-- NULL filtering: always include `Value IS NOT NULL` in WHERE
-- String literals use single quotes: 'value'
-- For "latest" queries: ORDER BY DateTime DESC LIMIT 1
-- For "last_month": compute previous calendar month dynamically using
-  `CAST(DateTime AS DATE) >= CAST(date_trunc('month', current_date) - INTERVAL '1 month' AS DATE)`
-  and `CAST(DateTime AS DATE) < CAST(date_trunc('month', current_date) AS DATE)`
-
-## Rules:
-1. Return ONLY the raw SQL query. No explanations. No markdown fences. No comments.
-2. Always filter by TagName using the exact TagName string provided.
-3. Always include `Value IS NOT NULL` in WHERE.
-4. Do NOT use parameterised placeholders (?). Inline all values as literals.
-5. For domain/summary queries involving multiple tags, use IN ('tag1', 'tag2', ...).
-6. Keep queries simple and correct. Prefer standard SQL patterns."""
+Return ONLY raw SQL. No markdown. No explanation."""
 
 
 def _build_sql_prompt(state: AgentState) -> str:
-    """Build the human message for SQL generation from the current state."""
+    """Build a minimal human message for SQL generation — only the relevant tag(s)."""
     intent_info = state["extracted_intent"]
     intent = intent_info.get("intent", "latest")
     tf = intent_info.get("time_filter", {"type": "latest"})
     domain_tags = state.get("domain_tags", [])
 
-    parts = [f"User question: {state['user_question']}"]
-    parts.append(f"Intent: {intent}")
-    parts.append(f"Time filter: {json.dumps(tf)}")
-
     if domain_tags:
-        parts.append(f"This is a DOMAIN query. Query ALL of these tags together:")
-        for t in domain_tags:
-            label = TAG_LABELS.get(t, t)
-            parts.append(f"  - {t} ({label})")
+        tag_str = ", ".join(f"'{t}'" for t in domain_tags)
+        parts = [
+            f"Tags: {tag_str}",
+            f"Intent: {intent}",
+            f"Time: {json.dumps(tf)}",
+        ]
     else:
         tag = state["resolved_tag"]
-        label = TAG_LABELS.get(tag, tag)
-        parts.append(f"Resolved tag: {tag} ({label})")
+        parts = [
+            f"Tag: '{tag}'",
+            f"Intent: {intent}",
+            f"Time: {json.dumps(tf)}",
+        ]
 
-    parts.append("\nWrite the DuckDB SQL query. Return ONLY the raw SQL, nothing else.")
     return "\n".join(parts)
 
 
@@ -329,7 +309,7 @@ def node_query_builder(state: AgentState) -> dict:
             "query_description": "No query — tag resolution failed.",
         }
 
-    llm = _get_llm()
+    llm = _get_sql_llm()
     from langchain_core.messages import SystemMessage, HumanMessage
 
     human_msg = _build_sql_prompt(state)
@@ -377,16 +357,14 @@ def _execute_sql(sql: str, params: list) -> tuple[list[dict] | None, str | None]
 
 def _ask_llm_to_fix_sql(state: AgentState, failed_sql: str, error_msg: str) -> str:
     """Ask Qwen to fix a failed SQL query given the error message."""
-    llm = _get_llm()
+    llm = _get_sql_llm()
     from langchain_core.messages import SystemMessage, HumanMessage
 
     fix_prompt = (
-        f"The following DuckDB SQL query failed with an error.\n\n"
-        f"## Failed SQL:\n{failed_sql}\n\n"
-        f"## DuckDB Error:\n{error_msg}\n\n"
-        f"## Original context:\n{_build_sql_prompt(state)}\n\n"
-        f"Fix the SQL query so it runs successfully on DuckDB. "
-        f"Return ONLY the corrected raw SQL, nothing else."
+        f"SQL:\n{failed_sql}\n"
+        f"Error: {error_msg}\n"
+        f"Context:\n{_build_sql_prompt(state)}\n"
+        f"Fix the SQL. Return ONLY corrected raw SQL."
     )
 
     response = llm.invoke([

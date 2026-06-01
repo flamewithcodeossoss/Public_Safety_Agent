@@ -68,33 +68,38 @@ class AgentState(TypedDict):
 # LLM SETUP  — Qwen via Ollama (Docker service)
 # ════════════════════════════════════════════════════════════════════
 
-# NOTE: We use stop=[";"] in the SQL generation LLM. To prevent it from
-# cutting off inside the thinking block, the system prompt strictly
-# forbids using semicolons inside the <think>...</think> block.
-# This forces the stop sequence to fire ONLY at the end of the SQL statement,
-# cutting generation latency down to seconds.
+# LATENCY CONTROL:
+# We use num_predict (Ollama's server-side hard token cap) to prevent
+# infinite generation loops from reasoning models.  This is the ONLY
+# reliable mechanism — stop sequences fire inside <think> blocks and
+# HTTP timeouts don't trigger when Ollama streams tokens slowly.
+#   - SQL generation: num_predict=512   (a SQL query is <200 tokens)
+#   - General LLM:    num_predict=1024  (JSON / NL answers are <500 tokens)
 
 
-def _get_llm(**kwargs):
+def _get_llm(num_predict: int = 1024, **kwargs):
     """
-    Returns a LangChain-compatible chat LLM.
-    Pass extra kwargs (e.g. stop=[...]) to override defaults.
+    Returns a LangChain-compatible chat LLM with a hard token cap.
 
-    Environment variables:
-        OLLAMA_MODEL    = "RogerBen/qwen3.5-35b-opus-distill:latest"  (default)
-        OLLAMA_BASE_URL = "http://192.168.1.206:11434"  (default)
+    Args:
+        num_predict: Max tokens Ollama will generate (hard server-side cap).
     """
     # ── Option A: Ollama (default — Docker or local) ────────────
     try:
         from langchain_ollama import ChatOllama
         model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
-        return ChatOllama(model=model, base_url=base_url, temperature=0, timeout=60.0, **kwargs)
+        return ChatOllama(
+            model=model,
+            base_url=base_url,
+            temperature=0,
+            num_predict=num_predict,
+            **kwargs,
+        )
     except ImportError:
         pass
 
     # ── Option B: vLLM / OpenAI-compatible endpoint ─────────────
-    #    For best latency, launch vLLM with --enable-prefix-caching
     try:
         from langchain_openai import ChatOpenAI
         base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
@@ -102,8 +107,9 @@ def _get_llm(**kwargs):
         return ChatOpenAI(
             model=model,
             base_url=base_url,
-            api_key="EMPTY",           # vLLM doesn't need a real key
+            api_key="EMPTY",
             temperature=0,
+            max_tokens=num_predict,
             **kwargs,
         )
     except ImportError:
@@ -117,8 +123,8 @@ def _get_llm(**kwargs):
 
 
 def _get_sql_llm():
-    """LLM tuned for SQL generation — includes semicolon stop sequence."""
-    return _get_llm(stop=[";"])
+    """LLM for SQL generation — hard-capped at 512 tokens, no stop sequences."""
+    return _get_llm(num_predict=512)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -284,7 +290,6 @@ OUTPUT RULES — STRICT:
 1. Return ONLY the raw executable SQL. End with a semicolon.
 2. No markdown fences. No ```sql. No explanations. No notes.
 3. If a query cannot be built, return exactly: SELECT 'ERROR: UNABLE_TO_GENERATE' AS error;
-4. Start your response with <think>. Keep your thinking process extremely brief and concise (1-2 lines maximum), and end it with </think>. Do NOT use semicolons (;) or backticks inside the <think>...</think> block. This is critical.
 
 SCHEMA:
   Table: hist
@@ -418,8 +423,7 @@ def _ask_llm_to_fix_sql(state: AgentState, failed_sql: str, error_msg: str) -> s
         f"SQL:\n{failed_sql}\n"
         f"Error: {error_msg}\n"
         f"Context:\n{_build_sql_prompt(state)}\n"
-        f"Fix the SQL. Return ONLY corrected raw SQL.\n"
-        f"Start your response with <think> and keep your thinking process extremely brief (1-2 lines maximum). Do NOT write semicolons inside the <think>...</think> block."
+        f"Fix the SQL. Return ONLY corrected raw SQL."
     )
 
     response = llm.invoke([

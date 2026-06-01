@@ -68,10 +68,11 @@ class AgentState(TypedDict):
 # LLM SETUP  — Qwen via Ollama (Docker service)
 # ════════════════════════════════════════════════════════════════════
 
-# NOTE: Stop sequences (";", "\n\n") are NOT used because Qwen 3.x
-# starts every response with <think>...</think>.  The stop tokens fire
-# INSIDE the thinking block, killing output before SQL is generated.
-# Instead we use /no_think in the human message to skip thinking entirely.
+# NOTE: We use stop=[";"] in the SQL generation LLM. To prevent it from
+# cutting off inside the thinking block, the system prompt strictly
+# forbids using semicolons inside the <think>...</think> block.
+# This forces the stop sequence to fire ONLY at the end of the SQL statement,
+# cutting generation latency down to seconds.
 
 
 def _get_llm(**kwargs):
@@ -116,8 +117,8 @@ def _get_llm(**kwargs):
 
 
 def _get_sql_llm():
-    """LLM for SQL generation — same as base LLM (no stop sequences)."""
-    return _get_llm()
+    """LLM tuned for SQL generation — includes semicolon stop sequence."""
+    return _get_llm(stop=[";"])
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -283,6 +284,7 @@ OUTPUT RULES — STRICT:
 1. Return ONLY the raw executable SQL. End with a semicolon.
 2. No markdown fences. No ```sql. No explanations. No notes.
 3. If a query cannot be built, return exactly: SELECT 'ERROR: UNABLE_TO_GENERATE' AS error;
+4. Start your response with <think>. Keep your thinking process extremely brief and concise (1-2 lines maximum), and end it with </think>. Do NOT use semicolons (;) or backticks inside the <think>...</think> block. This is critical.
 
 SCHEMA:
   Table: hist
@@ -348,8 +350,7 @@ def _build_sql_prompt(state: AgentState) -> str:
             f"Time: {json.dumps(tf)}",
         ]
 
-    # /no_think disables Qwen 3.x thinking mode for faster, cleaner SQL output
-    parts.append("/no_think")
+    # Do NOT use conflicting /no_think hacks which confuse reasoning models
     return "\n".join(parts)
 
 
@@ -418,7 +419,7 @@ def _ask_llm_to_fix_sql(state: AgentState, failed_sql: str, error_msg: str) -> s
         f"Error: {error_msg}\n"
         f"Context:\n{_build_sql_prompt(state)}\n"
         f"Fix the SQL. Return ONLY corrected raw SQL.\n"
-        f"/no_think"
+        f"Start your response with <think> and keep your thinking process extremely brief (1-2 lines maximum). Do NOT write semicolons inside the <think>...</think> block."
     )
 
     response = llm.invoke([

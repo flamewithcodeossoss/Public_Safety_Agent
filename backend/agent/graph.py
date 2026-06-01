@@ -181,8 +181,12 @@ def _strip_think(text: str) -> str:
 
 
 def _extract_sql(text: str) -> str:
-    """Extract raw SQL from LLM response, stripping markdown fences and think blocks."""
+    """Extract raw SQL from LLM response, stripping markdown fences, think blocks, and special tokens."""
     text = _strip_think(text)
+    
+    # Strip special control tokens that leak in raw text generation (e.g. <|endoftext|>, <|im_end|>)
+    text = re.sub(r"<\|.*?\|>", "", text)
+    
     # Strip markdown fences if model wraps in ```sql or ```
     if "```" in text:
         parts = text.split("```")
@@ -191,6 +195,8 @@ def _extract_sql(text: str) -> str:
             if cleaned.lower().startswith("sql"):
                 cleaned = cleaned[3:].strip()
             if cleaned:
+                # Also strip any special tokens within the markdown fence
+                cleaned = re.sub(r"<\|.*?\|>", "", cleaned)
                 return cleaned.strip()
     return text.strip()
 

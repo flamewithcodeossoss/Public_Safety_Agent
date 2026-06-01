@@ -89,7 +89,7 @@ def _get_llm(**kwargs):
         from langchain_ollama import ChatOllama
         model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
-        return ChatOllama(model=model, base_url=base_url, temperature=0, **kwargs)
+        return ChatOllama(model=model, base_url=base_url, temperature=0, timeout=60.0, **kwargs)
     except ImportError:
         pass
 

@@ -81,7 +81,11 @@ def _get_llm():
     # ── Option A: Ollama (default — Docker or local) ────────────
     try:
         from langchain_ollama import ChatOllama
+<<<<<<< HEAD
         model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
+=======
+        model = os.getenv("OLLAMA_MODEL", "qwen3:30b")
+>>>>>>> beb14c1332f889001101e643b18fcfda2885c8f6
         base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
         return ChatOllama(model=model, base_url=base_url, temperature=0)
     except ImportError:
@@ -157,11 +161,14 @@ Critical rules:
 - If user asks to SUMMARIZE a whole domain: intent="summary", location=domain name only
 - If user says "last month": time_filter.type="last_month" (NOT date_range)
 - Return ONLY the JSON object. No explanation. No markdown."""
+<<<<<<< HEAD
 
 def _strip_think(text: str) -> str:
     """Remove <think>...</think> blocks emitted by Qwen 3.x thinking mode."""
     return re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
 
+=======
+>>>>>>> beb14c1332f889001101e643b18fcfda2885c8f6
 
 def node_nl_understanding(state: AgentState) -> dict:
     """Node 1: Use Qwen to extract structured intent from the user question."""

@@ -1,41 +1,4 @@
 services:
-  # ── Ollama — Local LLM Server (Qwen 2.5:14b) ────────────────────
-  ollama:
-    image: ollama/ollama:latest
-    container_name: marassi_ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── Ollama Model Pull — one-time init container ──────────────────
-  ollama-pull:
-    image: curlimages/curl:latest
-    container_name: marassi_ollama_pull
-    depends_on:
-      ollama:
-        condition: service_healthy
-    entrypoint: >
-      sh -c "
-        echo 'Pulling qwen2.5:14b model...' &&
-        curl -s http://ollama:11434/api/pull -d '{\"name\": \"qwen2.5:14b\"}' &&
-        echo 'Model pull complete!'
-      "
-    restart: "no"
-
   # ── Backend — FastAPI + LangGraph + DuckDB ───────────────────────
   backend:
     build:
@@ -48,11 +11,8 @@ services:
       - ./data:/app/data:ro
     environment:
       - OLLAMA_MODEL=qwen2.5:14b
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_BASE_URL=http://192.168.1.145:11434
       - DATA_DIR=/app/data
-    depends_on:
-      ollama:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; print(httpx.get('http://localhost:8000/api/health').status_code)"]
@@ -74,6 +34,3 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
-
-volumes:
-  ollama_data:

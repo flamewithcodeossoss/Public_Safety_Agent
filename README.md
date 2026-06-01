@@ -4,36 +4,84 @@ AI-powered natural-language interface over AVEVA Historian data for smart city p
 
 ## Architecture
 
-```
-┌──────────────┐    ┌──────────────────┐    ┌───────────────┐
-│   Frontend   │    │     Backend      │    │    Ollama      │
-│  React+Vite  │───▶│  FastAPI+DuckDB  │───▶│  Qwen 2.5:14b │
-│  Port 5173   │    │  LangGraph Agent │    │  Port 11434   │
-└──────────────┘    └──────────────────┘    └───────────────┘
+The system uses a decoupled, three-tier architecture with an intelligent LangGraph pipeline that isolates LLM calls to prevent hallucinations against the database schema.
+
+```mermaid
+graph TD
+    %% Styling
+    classDef frontend fill:#0c1425,stroke:#4cc9f0,stroke-width:2px,color:#e8edf5
+    classDef backend fill:#131d33,stroke:#06d6a0,stroke-width:2px,color:#e8edf5
+    classDef llm fill:#2b1a3a,stroke:#7b61ff,stroke-width:2px,color:#e8edf5
+    classDef db fill:#332211,stroke:#f4a261,stroke-width:2px,color:#e8edf5
+
+    User((User)) -->|WebSocket / REST| React[React + Vite Dashboard]
+    React:::frontend -->|API Requests| FastAPI[FastAPI Backend]:::backend
+    
+    subgraph Backend [Backend Service]
+        FastAPI --> Agent[LangGraph Agent]:::backend
+        Agent <-->|Read Data| DuckDB[(DuckDB In-Memory)]:::db
+    end
+    
+    subgraph LLM [LLM Server]
+        Ollama[Ollama Server]:::llm
+        Qwen[Qwen 2.5:14b Model]:::llm
+        Ollama --- Qwen
+    end
+
+    Agent <-->|Generate / Format| Ollama
 ```
 
 ### Agent Pipeline (5 Nodes, Only 2 LLM Calls)
 
-1. **NL Understanding** (Qwen 2.5) — Extract intent, location, time filter
-2. **Tag Resolver** (Python) — Fuzzy match → exact AVEVA TagName
-3. **Query Builder** (Python) — Build DuckDB SQL deterministically
-4. **Executor** (Python) — Run query on in-memory DuckDB
-5. **Answer Formatter** (Qwen 2.5) — Format result as natural language
+To ensure determinism and prevent SQL hallucinations, the agent only uses the LLM for understanding and formatting:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant LLM as Qwen 2.5 (LLM)
+    participant Agent as Agent (Python)
+    participant DB as DuckDB
+    
+    User->>Agent: "What's the VIP traffic?"
+    
+    rect rgb(30, 20, 50)
+        Agent->>LLM: 1. Extract Intent & Time
+        LLM-->>Agent: {"intent": "current_value", "location": "VIP"}
+    end
+    
+    rect rgb(20, 40, 50)
+        Note over Agent: 2. Tag Resolver (Fuzzy Match)<br/>3. Query Builder (SQL string)
+        Agent->>DB: 4. Executor (DuckDB)
+        DB-->>Agent: Result Data
+    end
+    
+    rect rgb(30, 20, 50)
+        Agent->>LLM: 5. Answer Formatter
+        LLM-->>Agent: "The current VIP traffic is 45."
+    end
+    
+    Agent->>User: Natural Language Response
+```
 
 ## Quick Start
 
+You can run the application either natively (recommended) or via Docker.
+
+### Option A: Run Natively (Recommended)
+*Requires [Node.js](https://nodejs.org/en) and Python 3.12+ installed.*
+
 ```bash
-# 1. Clone and enter project
-cd Public_Safety_Agent
+# Start both backend and frontend automatically
+python all.py
+```
+*The script will open the backend on port 8000 and the frontend dashboard on port 5173.*
 
-# 2. Start all services (GPU-accelerated)
-docker compose up --build
+### Option B: Run via Docker
+*Requires Docker Desktop.*
 
-# 3. First run will pull Qwen 2.5:14b model (~9GB)
-# Wait for "Model pull complete!" in logs
-
-# 4. Open dashboard
-open http://localhost:5173
+```bash
+# Build and start the containers
+docker compose up -d --build
 ```
 
 ## Data

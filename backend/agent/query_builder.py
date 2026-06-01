@@ -22,6 +22,8 @@ Intent structure (produced by Node 1):
 
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import date, timedelta
+import calendar
 
 
 @dataclass
@@ -51,6 +53,18 @@ def build_query(intent: dict) -> QueryResult:
             f"DateTime >= (SELECT MAX(DateTime) FROM hist WHERE TagName = ?) - INTERVAL '{n_hours} hours'"
         )
         params.append(tag)
+
+    elif tf_type == "last_month":
+        # Resolve to the previous calendar month's full date range.
+        today = date.today()
+        first_of_this_month = today.replace(day=1)
+        last_month_end = first_of_this_month - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        where_clauses.append(
+            "CAST(DateTime AS DATE) >= CAST(? AS DATE) "
+            "AND CAST(DateTime AS DATE) <= CAST(? AS DATE)"
+        )
+        params += [last_month_start.isoformat(), last_month_end.isoformat()]
 
     elif tf_type == "date_range":
         # Cast to DATE so a single-day query (start=end=2026-05-08)
@@ -158,7 +172,7 @@ def build_query(intent: dict) -> QueryResult:
     else:
         # Default to latest
         sql = f"""
-            SELECT TagName, DateTime, Value, vValue, StartDateTime
+            SELECT TagName, DateTime, Value, l, StartDateTime
             FROM hist
             WHERE {where_sql}
             ORDER BY DateTime DESC
@@ -186,4 +200,77 @@ def build_comparison_query(tag_names: list[str]) -> QueryResult:
         sql=sql,
         params=tag_names,
         description=f"Latest values for {len(tag_names)} tags: {', '.join(tag_names)}"
+    )
+
+
+def build_domain_summary_query(tag_names: list[str], tf: dict) -> QueryResult:
+    """
+    Build a domain-level summary query: avg, min, max, count per tag,
+    with an optional time filter (last_month, date_range, last_n, all).
+
+    Used when the user says 'summarize CCTV status for last month' —
+    queries ALL tags in the domain at once and returns statistics per tag.
+    """
+    from datetime import date, timedelta
+
+    # Build time filter WHERE conditions
+    time_where = "Value IS NOT NULL"
+    time_params: list = []
+
+    tf_type = tf.get("type", "all")
+
+    if tf_type == "last_month":
+        today = date.today()
+        first_of_this_month = today.replace(day=1)
+        last_month_end = first_of_this_month - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        time_where += (
+            " AND CAST(DateTime AS DATE) >= CAST(? AS DATE)"
+            " AND CAST(DateTime AS DATE) <= CAST(? AS DATE)"
+        )
+        time_params += [last_month_start.isoformat(), last_month_end.isoformat()]
+        period_desc = f"{last_month_start.strftime('%B %Y')}"
+
+    elif tf_type == "date_range":
+        time_where += (
+            " AND CAST(DateTime AS DATE) >= CAST(? AS DATE)"
+            " AND CAST(DateTime AS DATE) <= CAST(? AS DATE)"
+        )
+        time_params += [tf["start"], tf["end"]]
+        period_desc = f"{tf['start']} to {tf['end']}"
+
+    elif tf_type == "last_n":
+        n = int(tf.get("n", 24))
+        time_where += (
+            f" AND DateTime >= (SELECT MAX(DateTime) FROM hist) - INTERVAL '{n} hours'"
+        )
+        period_desc = f"last {n} hours"
+
+    else:
+        period_desc = "all time"
+
+    placeholders = ", ".join(["?" for _ in tag_names])
+
+    sql = f"""
+        SELECT
+            TagName,
+            ROUND(AVG(Value), 2)   AS avg_value,
+            MIN(Value)             AS min_value,
+            MAX(Value)             AS max_value,
+            COUNT(*)               AS sample_count,
+            MIN(DateTime)          AS period_start,
+            MAX(DateTime)          AS period_end
+        FROM hist
+        WHERE TagName IN ({placeholders})
+          AND {time_where}
+        GROUP BY TagName
+        ORDER BY TagName
+    """.strip()
+
+    params = tag_names + time_params
+
+    return QueryResult(
+        sql=sql,
+        params=params,
+        description=f"Domain summary (avg/min/max) for {period_desc}: {', '.join(tag_names)}"
     )

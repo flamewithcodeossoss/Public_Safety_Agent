@@ -5,7 +5,7 @@ Smart City LangGraph Agent
 
   [user_question]
        ↓
-  Node 1: nl_understanding   ← Qwen 2.5  (extract intent + entities)
+  Node 1: nl_understanding   ← Qwen 3.5  (extract intent + entities)
        ↓
   Node 2: tag_resolver       ← Deterministic (fuzzy match → TagName)
        ↓
@@ -13,7 +13,7 @@ Smart City LangGraph Agent
        ↓
   Node 4: executor           ← Deterministic (run query → raw result)
        ↓
-  Node 5: answer_formatter   ← Qwen 2.5  (format result → natural language)
+  Node 5: answer_formatter   ← Qwen 3.5  (format result → natural language)
 
 The LLM is only used in Node 1 (extraction) and Node 5 (formatting).
 All data logic is deterministic Python — safe with local models.
@@ -82,7 +82,7 @@ def _get_llm():
     Tries Ollama first (local), falls back to OpenAI-compatible vLLM.
 
     Set environment variables:
-        OLLAMA_MODEL   = "qwen2.5:7b"  (default)
+        OLLAMA_MODEL   = "RogerBen/qwen3.5-35b-opus-distill:latest"  (default)
         OLLAMA_BASE_URL = "http://localhost:11434"
 
         OR for vLLM:
@@ -92,7 +92,7 @@ def _get_llm():
     # ── Option A: Ollama ────────────────────────────────────────
     try:
         from langchain_ollama import ChatOllama
-        model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+        model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         return ChatOllama(model=model, base_url=base_url, temperature=0)
     except ImportError:

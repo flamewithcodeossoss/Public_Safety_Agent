@@ -117,7 +117,7 @@ docker compose up -d --build
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `OLLAMA_MODEL` | `qwen2.5:14b` | Ollama model name |
+| `OLLAMA_MODEL` | `RogerBen/qwen3.5-35b-opus-distill:latest` | Ollama model name |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama server URL |
 | `DATA_DIR` | `/app/data` | Path to CSV files |
 

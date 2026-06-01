@@ -81,6 +81,23 @@ TAG_REGISTRY: dict[str, str] = {
     "gates passing":               "MRS_Gate_APIs.Gates.Success",
     "api success":                 "MRS_Gate_APIs.Gates.Success",
     "gate successes":              "MRS_Gate_APIs.Gates.Success",
+    # ── Domain-level aliases (for summary queries) ────────────────
+    "cctv":                        "__domain__cctv",
+    "cctv status":                 "__domain__cctv",
+    "cameras":                     "__domain__cctv",
+    "camera system":               "__domain__cctv",
+    "camera status":               "__domain__cctv",
+    "surveillance":                "__domain__cctv",
+
+    "access control":              "__domain__access_control",
+    "access control status":       "__domain__access_control",
+    "access points":               "__domain__access_control",
+    "entry points":                "__domain__access_control",
+
+    "gates":                       "__domain__gate_apis",
+    "gate apis":                   "__domain__gate_apis",
+    "gate api status":             "__domain__gate_apis",
+    "gate status":                 "__domain__gate_apis",
 }
 
 # Reverse map: TagName → canonical human label (for answer formatting)
@@ -108,3 +125,21 @@ TAG_DOMAIN: dict[str, str] = {
 }
 
 ALL_TAG_NAMES = list(TAG_LABELS.keys())
+
+# Domain → list of tags (used by multi-tag summary queries)
+DOMAIN_TAGS: dict[str, list[str]] = {
+    "cctv": [
+        "MRS_CCTV.cameras_total_number",
+        "MRS_CCTV.Total_enabled_cameras",
+        "MRS_CCTV.Total_disabled_cameras",
+    ],
+    "access_control": [
+        "MRS_Access_Control.AccessChannels_QR",
+        "MRS_Access_Control.Beaches_Vip",
+        "MRS_Access_Control.MainGate_Vip",
+    ],
+    "gate_apis": [
+        "MRS_Gate_APIs.Gates.Fail",
+        "MRS_Gate_APIs.Gates.Success",
+    ],
+}

@@ -7,8 +7,8 @@ Natural-language interface over AVEVA Historian CSV exports.
 ```bash
 pip install -r requirements.txt
 
-# If using Ollama (recommended for local Qwen 2.5)
-ollama pull qwen2.5:7b
+# If using Ollama (recommended for local Qwen 3.5)
+ollama pull RogerBen/qwen3.5-35b-opus-distill:latest
 ```
 
 ## Data
@@ -71,7 +71,7 @@ Node 5 — Answer Formatter   [Qwen 2.5]   format result as natural language
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATA_DIR` | `./data` | Path to CSV files |
-| `OLLAMA_MODEL` | `qwen2.5:7b` | Ollama model name |
+| `OLLAMA_MODEL` | `RogerBen/qwen3.5-35b-opus-distill:latest` | Ollama model name |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
 | `VLLM_BASE_URL` | `http://localhost:8000/v1` | vLLM endpoint (if using vLLM) |
 | `VLLM_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | Model name for vLLM |

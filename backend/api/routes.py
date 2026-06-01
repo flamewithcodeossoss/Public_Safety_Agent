@@ -220,7 +220,7 @@ async def health_check():
 
     # Check Ollama
     ollama_ok = False
-    ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+    ollama_model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
     ollama_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.145:11434")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:

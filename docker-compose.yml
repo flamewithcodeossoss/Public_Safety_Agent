@@ -10,7 +10,7 @@ services:
     volumes:
       - ./data:/app/data:ro
     environment:
-      - OLLAMA_MODEL=qwen2.5:14b
+      - OLLAMA_MODEL=RogerBen/qwen3.5-35b-opus-distill:latest
       - OLLAMA_BASE_URL=http://192.168.1.145:11434
       - DATA_DIR=/app/data
     restart: unless-stopped

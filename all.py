@@ -56,8 +56,8 @@ def start_backend():
 
     env = os.environ.copy()
     env["DATA_DIR"] = str(ROOT / "data")
-    env.setdefault("OLLAMA_BASE_URL", "http://192.168.1.145:11434")
-    env.setdefault("OLLAMA_MODEL", "qwen2.5:14b")
+    env.setdefault("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
+    env.setdefault("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
 
     proc = subprocess.Popen(
         [
@@ -148,7 +148,7 @@ def main():
     print()
     print(f"  {BOLD}Backend  →{RESET}  http://localhost:8000       (API docs: /docs)")
     print(f"  {BOLD}Frontend →{RESET}  http://localhost:5173       (Dashboard)")
-    print(f"  {BOLD}Ollama   →{RESET}  http://192.168.1.145:11434  (remote LLM server)")
+    print(f"  {BOLD}Ollama   →{RESET}  http://192.168.1.206:11434  (remote LLM server)")
     print()
     print(f"  {YELLOW}Press Ctrl+C to stop all services{RESET}")
     print()

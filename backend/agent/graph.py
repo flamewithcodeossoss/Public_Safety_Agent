@@ -68,8 +68,10 @@ class AgentState(TypedDict):
 # LLM SETUP  — Qwen via Ollama (Docker service)
 # ════════════════════════════════════════════════════════════════════
 
-# Stop tokens for SQL generation — cuts output as soon as the SQL ends
-_SQL_STOP = [";", "```", "\n\n"]
+# NOTE: Stop sequences (";", "\n\n") are NOT used because Qwen 3.x
+# starts every response with <think>...</think>.  The stop tokens fire
+# INSIDE the thinking block, killing output before SQL is generated.
+# Instead we use /no_think in the human message to skip thinking entirely.
 
 
 def _get_llm(**kwargs):
@@ -114,8 +116,8 @@ def _get_llm(**kwargs):
 
 
 def _get_sql_llm():
-    """LLM tuned for SQL generation — includes stop sequences to cut latency."""
-    return _get_llm(stop=_SQL_STOP)
+    """LLM for SQL generation — same as base LLM (no stop sequences)."""
+    return _get_llm()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -169,8 +171,13 @@ Critical rules:
 - Return ONLY the JSON object. No explanation. No markdown."""
 
 def _strip_think(text: str) -> str:
-    """Remove <think>...</think> blocks emitted by Qwen 3.x thinking mode."""
-    return re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    """Remove <think>...</think> blocks emitted by Qwen 3.x thinking mode.
+    Also handles unclosed <think> tags (e.g. when output was truncated)."""
+    # First: remove properly closed <think>...</think> blocks
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+    # Safety net: remove unclosed <think> blocks (truncated by stop tokens / max tokens)
+    text = re.sub(r"<think>[\s\S]*$", "", text)
+    return text.strip()
 
 
 def _extract_sql(text: str) -> str:
@@ -335,6 +342,8 @@ def _build_sql_prompt(state: AgentState) -> str:
             f"Time: {json.dumps(tf)}",
         ]
 
+    # /no_think disables Qwen 3.x thinking mode for faster, cleaner SQL output
+    parts.append("/no_think")
     return "\n".join(parts)
 
 
@@ -402,7 +411,8 @@ def _ask_llm_to_fix_sql(state: AgentState, failed_sql: str, error_msg: str) -> s
         f"SQL:\n{failed_sql}\n"
         f"Error: {error_msg}\n"
         f"Context:\n{_build_sql_prompt(state)}\n"
-        f"Fix the SQL. Return ONLY corrected raw SQL."
+        f"Fix the SQL. Return ONLY corrected raw SQL.\n"
+        f"/no_think"
     )
 
     response = llm.invoke([

@@ -263,16 +263,54 @@ def node_tag_resolver(state: AgentState) -> dict:
 # NODE 3 — QUERY BUILDER  (LLM-powered: Qwen generates DuckDB SQL)
 # ════════════════════════════════════════════════════════════════════
 
-_SQL_GEN_SYSTEM = """You are a DuckDB SQL expert. Write ONE query against table `hist`.
+_SQL_GEN_SYSTEM = """\
+You are a deterministic Text-to-SQL engine for a DuckDB database tracking Marassi Smart City infrastructure (CCTV, access control, gate APIs).
 
-Schema: hist(TagName VARCHAR, DateTime TIMESTAMP, Value INTEGER, vValue INTEGER, StartDateTime TIMESTAMP)
+OUTPUT RULES — STRICT:
+1. Return ONLY the raw executable SQL. End with a semicolon.
+2. No markdown fences. No ```sql. No explanations. No notes.
+3. If a query cannot be built, return exactly: SELECT 'ERROR: UNABLE_TO_GENERATE' AS error;
 
-DuckDB notes:
-- Time offsets: INTERVAL '24 hours'. Date compare: CAST(x AS DATE). Last month: date_trunc('month', current_date) - INTERVAL '1 month'.
-- Always include WHERE Value IS NOT NULL.
-- Inline all values as literals (no ? placeholders).
+SCHEMA:
+  Table: hist
+  Columns:
+    TagName       VARCHAR    — exact sensor identifier (e.g. 'MRS_CCTV.Total_disabled_cameras')
+    DateTime      TIMESTAMP  — observation timestamp
+    Value         INTEGER    — primary reading (may be NULL)
+    vValue        INTEGER    — verified value (mirrors Value; ignore unless asked)
+    StartDateTime TIMESTAMP  — interval start (mirrors DateTime; ignore unless asked)
 
-Return ONLY raw SQL. No markdown. No explanation."""
+VALID TagName VALUES (always use exact strings):
+  Access Control: 'MRS_Access_Control.AccessChannels_QR', 'MRS_Access_Control.Beaches_Vip', 'MRS_Access_Control.MainGate_Vip'
+  CCTV:           'MRS_CCTV.cameras_total_number', 'MRS_CCTV.Total_disabled_cameras', 'MRS_CCTV.Total_enabled_cameras'
+  Gate APIs:      'MRS_Gate_APIs.Gates.Fail', 'MRS_Gate_APIs.Gates.Success'
+
+QUERY CONSTRAINTS:
+- Always filter: WHERE Value IS NOT NULL
+- TagName match: use exact = (tags are pre-resolved, never use LOWER/LIKE)
+- Inline all literal values (no ? placeholders)
+- Time arithmetic: use INTERVAL syntax (e.g. CURRENT_TIMESTAMP - INTERVAL '24 hours')
+- Date boundaries: use CAST(DateTime AS DATE), or date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
+- Scalar aggregates (latest/max/min/avg/sum): always LIMIT 1 unless GROUP BY is present
+- Trend / history: ORDER BY DateTime ASC, no LIMIT unless user specifies one
+- Multi-tag domain queries: use TagName IN (...) with GROUP BY TagName
+
+FEW-SHOT EXAMPLES:
+
+Tag: 'MRS_CCTV.Total_disabled_cameras'  Intent: latest  Time: {"type":"latest"}
+SELECT Value, DateTime FROM hist WHERE TagName = 'MRS_CCTV.Total_disabled_cameras' AND Value IS NOT NULL ORDER BY DateTime DESC LIMIT 1;
+
+Tag: 'MRS_Access_Control.Beaches_Vip'  Intent: max  Time: {"type":"date_range","start":"2026-02-01","end":"2026-02-28"}
+SELECT MAX(Value) AS max_value FROM hist WHERE TagName = 'MRS_Access_Control.Beaches_Vip' AND Value IS NOT NULL AND CAST(DateTime AS DATE) >= '2026-02-01' AND CAST(DateTime AS DATE) <= '2026-02-28';
+
+Tag: 'MRS_Gate_APIs.Gates.Fail'  Intent: trend  Time: {"type":"last_n","n":24}
+SELECT Value, DateTime FROM hist WHERE TagName = 'MRS_Gate_APIs.Gates.Fail' AND Value IS NOT NULL AND DateTime >= CURRENT_TIMESTAMP - INTERVAL '24 hours' ORDER BY DateTime ASC;
+
+Tags: 'MRS_CCTV.cameras_total_number','MRS_CCTV.Total_enabled_cameras','MRS_CCTV.Total_disabled_cameras'  Intent: summary  Time: {"type":"latest"}
+SELECT TagName, Value, DateTime FROM hist WHERE TagName IN ('MRS_CCTV.cameras_total_number','MRS_CCTV.Total_enabled_cameras','MRS_CCTV.Total_disabled_cameras') AND Value IS NOT NULL AND (TagName, DateTime) IN (SELECT TagName, MAX(DateTime) FROM hist WHERE Value IS NOT NULL GROUP BY TagName);
+
+Tag: 'MRS_Access_Control.MainGate_Vip'  Intent: average  Time: {"type":"last_month"}
+SELECT AVG(Value) AS avg_value FROM hist WHERE TagName = 'MRS_Access_Control.MainGate_Vip' AND Value IS NOT NULL AND DateTime >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month' AND DateTime < date_trunc('month', CURRENT_DATE);"""
 
 
 def _build_sql_prompt(state: AgentState) -> str:

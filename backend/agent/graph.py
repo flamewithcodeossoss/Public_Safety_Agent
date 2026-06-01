@@ -5,18 +5,18 @@ Smart City LangGraph Agent
 
   [user_question]
        ↓
-  Node 1: nl_understanding   ← Qwen 3.5:35b  (extract intent + entities)
+  Node 1: nl_understanding   ← Qwen  (extract intent + entities)
        ↓
   Node 2: tag_resolver       ← Deterministic (fuzzy match → TagName)
        ↓
-  Node 3: query_builder      ← Deterministic (build DuckDB SQL)
+  Node 3: query_builder      ← Qwen  (resolved tag + schema → raw SQL)
        ↓
-  Node 4: executor           ← Deterministic (run query → raw result)
+  Node 4: executor           ← DuckDB (run SQL; on error → reflect back to Qwen, retry up to 3×)
        ↓
-  Node 5: answer_formatter   ← Qwen 3.5:35b  (format result → natural language)
+  Node 5: answer_formatter   ← Qwen  (format result → natural language)
 
-The LLM is only used in Node 1 (extraction) and Node 5 (formatting).
-All data logic is deterministic Python — safe with local models.
+The LLM is used in Node 1 (extraction), Node 3 (SQL generation),
+Node 4 (reflection on errors), and Node 5 (formatting).
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from langgraph.graph import StateGraph, END
 
 # ── Internal modules ────────────────────────────────────────────────
 from agent.tag_resolver   import resolve_tag, resolve_domain_tags, tag_label
-from agent.query_builder  import build_query, build_comparison_query, build_domain_summary_query
 from agent.data_loader    import get_connection
 from config.tag_registry  import TAG_LABELS, DOMAIN_TAGS
 
@@ -66,26 +65,22 @@ class AgentState(TypedDict):
 
 
 # ════════════════════════════════════════════════════════════════════
-# LLM SETUP  — Qwen 3.5:35b via Ollama (Docker service)
+# LLM SETUP  — Qwen via Ollama (Docker service)
 # ════════════════════════════════════════════════════════════════════
 
 def _get_llm():
     """
     Returns a LangChain-compatible chat LLM.
-    Configured for Ollama (Qwen 3.5:35b) by default.
+    Configured for Ollama (Qwen) by default.
 
     Environment variables:
-        OLLAMA_MODEL    = "qwen3.5:35b"  (default)
-        OLLAMA_BASE_URL = "http://ollama:11434"  (Docker service name)
+        OLLAMA_MODEL    = "RogerBen/qwen3.5-35b-opus-distill:latest"  (default)
+        OLLAMA_BASE_URL = "http://192.168.1.206:11434"  (default)
     """
     # ── Option A: Ollama (default — Docker or local) ────────────
     try:
         from langchain_ollama import ChatOllama
-<<<<<<< HEAD
         model = os.getenv("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
-=======
-        model = os.getenv("OLLAMA_MODEL", "qwen3:30b")
->>>>>>> beb14c1332f889001101e643b18fcfda2885c8f6
         base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
         return ChatOllama(model=model, base_url=base_url, temperature=0)
     except ImportError:
@@ -161,14 +156,26 @@ Critical rules:
 - If user asks to SUMMARIZE a whole domain: intent="summary", location=domain name only
 - If user says "last month": time_filter.type="last_month" (NOT date_range)
 - Return ONLY the JSON object. No explanation. No markdown."""
-<<<<<<< HEAD
 
 def _strip_think(text: str) -> str:
     """Remove <think>...</think> blocks emitted by Qwen 3.x thinking mode."""
     return re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
 
-=======
->>>>>>> beb14c1332f889001101e643b18fcfda2885c8f6
+
+def _extract_sql(text: str) -> str:
+    """Extract raw SQL from LLM response, stripping markdown fences and think blocks."""
+    text = _strip_think(text)
+    # Strip markdown fences if model wraps in ```sql or ```
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts[1::2]:  # odd-indexed parts are inside fences
+            cleaned = part.strip()
+            if cleaned.lower().startswith("sql"):
+                cleaned = cleaned[3:].strip()
+            if cleaned:
+                return cleaned.strip()
+    return text.strip()
+
 
 def node_nl_understanding(state: AgentState) -> dict:
     """Node 1: Use Qwen to extract structured intent from the user question."""
@@ -242,11 +249,79 @@ def node_tag_resolver(state: AgentState) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════════
-# NODE 3 — QUERY BUILDER
+# NODE 3 — QUERY BUILDER  (LLM-powered: Qwen generates DuckDB SQL)
 # ════════════════════════════════════════════════════════════════════
 
+_SQL_GEN_SYSTEM = """You are a DuckDB SQL expert for a Smart City monitoring system.
+Given a user's intent, a resolved sensor tag, and the database schema, write a single DuckDB SQL query.
+
+## Database Schema
+
+Table: `hist`
+Columns:
+  - TagName       VARCHAR    — sensor identifier (e.g. 'MRS_CCTV.Total_enabled_cameras')
+  - DateTime      TIMESTAMP  — when the reading was recorded
+  - Value         INTEGER    — the numeric sensor reading (may be NULL)
+  - vValue        INTEGER    — secondary numeric value (may be NULL)
+  - StartDateTime TIMESTAMP  — start time of the reading interval
+
+## Available TagNames and their human labels:
+- MRS_Access_Control.AccessChannels_QR   → "Access Channels (QR)"
+- MRS_Access_Control.Beaches_Vip         → "Beaches VIP Access Point"
+- MRS_Access_Control.MainGate_Vip        → "Main Gate VIP Access Point"
+- MRS_CCTV.cameras_total_number          → "Total CCTV Cameras"
+- MRS_CCTV.Total_disabled_cameras        → "Disabled CCTV Cameras"
+- MRS_CCTV.Total_enabled_cameras         → "Enabled CCTV Cameras"
+- MRS_Gate_APIs.Gates.Fail               → "Gate API Failures"
+- MRS_Gate_APIs.Gates.Success            → "Gate API Successes"
+
+## DuckDB-specific syntax notes:
+- Use INTERVAL for time offsets: `INTERVAL '24 hours'`, `INTERVAL '7 days'`
+- Use CAST(x AS DATE) for date comparisons
+- Use QUALIFY ROW_NUMBER() OVER (...) for top-N per group
+- NULL filtering: always include `Value IS NOT NULL` in WHERE
+- String literals use single quotes: 'value'
+- For "latest" queries: ORDER BY DateTime DESC LIMIT 1
+- For "last_month": compute previous calendar month dynamically using
+  `CAST(DateTime AS DATE) >= CAST(date_trunc('month', current_date) - INTERVAL '1 month' AS DATE)`
+  and `CAST(DateTime AS DATE) < CAST(date_trunc('month', current_date) AS DATE)`
+
+## Rules:
+1. Return ONLY the raw SQL query. No explanations. No markdown fences. No comments.
+2. Always filter by TagName using the exact TagName string provided.
+3. Always include `Value IS NOT NULL` in WHERE.
+4. Do NOT use parameterised placeholders (?). Inline all values as literals.
+5. For domain/summary queries involving multiple tags, use IN ('tag1', 'tag2', ...).
+6. Keep queries simple and correct. Prefer standard SQL patterns."""
+
+
+def _build_sql_prompt(state: AgentState) -> str:
+    """Build the human message for SQL generation from the current state."""
+    intent_info = state["extracted_intent"]
+    intent = intent_info.get("intent", "latest")
+    tf = intent_info.get("time_filter", {"type": "latest"})
+    domain_tags = state.get("domain_tags", [])
+
+    parts = [f"User question: {state['user_question']}"]
+    parts.append(f"Intent: {intent}")
+    parts.append(f"Time filter: {json.dumps(tf)}")
+
+    if domain_tags:
+        parts.append(f"This is a DOMAIN query. Query ALL of these tags together:")
+        for t in domain_tags:
+            label = TAG_LABELS.get(t, t)
+            parts.append(f"  - {t} ({label})")
+    else:
+        tag = state["resolved_tag"]
+        label = TAG_LABELS.get(tag, tag)
+        parts.append(f"Resolved tag: {tag} ({label})")
+
+    parts.append("\nWrite the DuckDB SQL query. Return ONLY the raw SQL, nothing else.")
+    return "\n".join(parts)
+
+
 def node_query_builder(state: AgentState) -> dict:
-    """Node 3: Build DuckDB SQL — routes to domain summary or single-tag query."""
+    """Node 3: Use Qwen to generate DuckDB SQL from resolved tag + schema."""
     if state.get("resolver_error"):
         return {
             "query_sql": "",
@@ -254,52 +329,121 @@ def node_query_builder(state: AgentState) -> dict:
             "query_description": "No query — tag resolution failed.",
         }
 
+    llm = _get_llm()
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    human_msg = _build_sql_prompt(state)
+
+    response = llm.invoke([
+        SystemMessage(content=_SQL_GEN_SYSTEM),
+        HumanMessage(content=human_msg),
+    ])
+
+    sql = _extract_sql(response.content)
+
+    # Build a human-readable description
     intent = state["extracted_intent"].get("intent", "latest")
-    tf     = state["extracted_intent"].get("time_filter", {"type": "latest"})
-
-    # ── Domain summary path ──────────────────────────────────────
     domain_tags = state.get("domain_tags", [])
-    if domain_tags or intent == "summary":
-        tags = domain_tags or [state["resolved_tag"]]
-        qr = build_domain_summary_query(tags, tf)
-        return {
-            "query_sql": qr.sql,
-            "query_params": qr.params,
-            "query_description": qr.description,
-        }
+    if domain_tags:
+        desc = f"LLM-generated {intent} query for domain ({len(domain_tags)} tags)"
+    else:
+        desc = f"LLM-generated {intent} query for {state.get('resolved_tag', 'unknown')}"
 
-    # ── Single-tag path ──────────────────────────────────────────
-    intent_dict = {
-        **state["extracted_intent"],
-        "tag_name": state["resolved_tag"],
-    }
-    qr = build_query(intent_dict)
     return {
-        "query_sql": qr.sql,
-        "query_params": qr.params,
-        "query_description": qr.description,
+        "query_sql": sql,
+        "query_params": [],       # LLM inlines all values, no params needed
+        "query_description": desc,
     }
 
 
 # ════════════════════════════════════════════════════════════════════
-# NODE 4 — EXECUTOR
+# NODE 4 — EXECUTOR  (with reflection loop: retry up to 3× on error)
 # ════════════════════════════════════════════════════════════════════
 
-def node_executor(state: AgentState) -> dict:
-    """Node 4: Run the SQL against DuckDB. No LLM."""
-    if not state.get("query_sql"):
-        return {"raw_result": [], "executor_error": "No SQL to execute."}
+_MAX_SQL_RETRIES = 3
 
+
+def _execute_sql(sql: str, params: list) -> tuple[list[dict] | None, str | None]:
+    """Run SQL against DuckDB. Returns (rows, None) on success or (None, error) on failure."""
     try:
         conn = get_connection()
-        rel  = conn.execute(state["query_sql"], state["query_params"])
+        rel = conn.execute(sql, params)
         cols = [d[0] for d in rel.description]
         rows = rel.fetchall()
-        result = [dict(zip(cols, row)) for row in rows]
+        return [dict(zip(cols, row)) for row in rows], None
+    except Exception as e:
+        return None, str(e)
+
+
+def _ask_llm_to_fix_sql(state: AgentState, failed_sql: str, error_msg: str) -> str:
+    """Ask Qwen to fix a failed SQL query given the error message."""
+    llm = _get_llm()
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    fix_prompt = (
+        f"The following DuckDB SQL query failed with an error.\n\n"
+        f"## Failed SQL:\n{failed_sql}\n\n"
+        f"## DuckDB Error:\n{error_msg}\n\n"
+        f"## Original context:\n{_build_sql_prompt(state)}\n\n"
+        f"Fix the SQL query so it runs successfully on DuckDB. "
+        f"Return ONLY the corrected raw SQL, nothing else."
+    )
+
+    response = llm.invoke([
+        SystemMessage(content=_SQL_GEN_SYSTEM),
+        HumanMessage(content=fix_prompt),
+    ])
+
+    return _extract_sql(response.content)
+
+
+def node_executor(state: AgentState) -> dict:
+    """Node 4: Run SQL against DuckDB. On error, ask Qwen to fix it (up to 3 retries)."""
+    sql = state.get("query_sql", "")
+    params = state.get("query_params", [])
+
+    if not sql:
+        return {"raw_result": [], "executor_error": "No SQL to execute."}
+
+    # First attempt
+    result, error = _execute_sql(sql, params)
+    if error is None:
         return {"raw_result": result, "executor_error": None}
 
-    except Exception as e:
-        return {"raw_result": [], "executor_error": str(e)}
+    # ── Reflection loop: silently retry up to _MAX_SQL_RETRIES times ──
+    current_sql = sql
+    last_error = error
+
+    for attempt in range(1, _MAX_SQL_RETRIES + 1):
+        print(f"[executor] SQL failed (attempt {attempt}/{_MAX_SQL_RETRIES}): {last_error}")
+        print(f"[executor] Asking Qwen to fix the query...")
+
+        try:
+            fixed_sql = _ask_llm_to_fix_sql(state, current_sql, last_error)
+        except Exception as llm_err:
+            print(f"[executor] LLM fix request failed: {llm_err}")
+            break
+
+        if not fixed_sql or fixed_sql == current_sql:
+            print(f"[executor] LLM returned same/empty SQL, stopping retries.")
+            break
+
+        current_sql = fixed_sql
+        result, error = _execute_sql(current_sql, [])
+
+        if error is None:
+            print(f"[executor] Retry {attempt} succeeded!")
+            return {
+                "raw_result": result,
+                "executor_error": None,
+                "query_sql": current_sql,  # update state with the fixed SQL
+            }
+
+        last_error = error
+
+    # All retries exhausted
+    print(f"[executor] All {_MAX_SQL_RETRIES} retries exhausted. Last error: {last_error}")
+    return {"raw_result": [], "executor_error": last_error}
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -455,7 +599,7 @@ async def ask_streaming(question: str) -> AsyncIterator[dict]:
     node_labels = {
         "nl_understanding": "Understanding your question...",
         "tag_resolver":     "Resolving sensor tag...",
-        "query_builder":    "Building query...",
+        "query_builder":    "Generating SQL query...",
         "executor":         "Querying database...",
         "answer_formatter": "Formatting answer...",
     }
@@ -479,7 +623,7 @@ def _serialize(obj):
 
 
 # ════════════════════════════════════════════════════════════════════
-# DEV: run directly for testing (bypasses LLM, tests data layer only)
+# DEV: run directly for testing
 # ════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
@@ -487,35 +631,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=None)
-    parser.add_argument("--no-llm",   action="store_true",
-                        help="Test data layer only (skips LLM nodes)")
     args = parser.parse_args()
 
     dd = Path(args.data_dir) if args.data_dir else None
 
-    if args.no_llm:
-        # Quick data-layer smoke test
-        from agent.data_loader import get_connection
-        from agent.tag_resolver import resolve_tag
-        from agent.query_builder import build_query
-
-        conn = get_connection(dd or Path(__file__).parent.parent / "data")
-        tests = [
-            ("beaches vip", "latest"),
-            ("main gate",   "latest"),
-            ("disabled cameras", "average"),
-            ("gates fail",  "trend"),
-        ]
-        for loc, intent in tests:
-            tag, conf = resolve_tag(loc)
-            print(f"\n[{loc}] → {tag}  (conf={conf})")
-            if tag:
-                qr = build_query({"intent": intent, "tag_name": tag,
-                                   "time_filter": {"type": "latest"}})
-                rows = conn.execute(qr.sql, qr.params).fetchall()
-                print(f"  SQL: {qr.sql[:80]}...")
-                print(f"  Result: {rows}")
-    else:
-        q = "What is the current traffic or count at the Beaches VIP access point?"
-        print(f"Q: {q}")
-        print(f"A: {ask(q, data_dir=dd)}")
+    q = "What is the current traffic or count at the Beaches VIP access point?"
+    print(f"Q: {q}")
+    print(f"A: {ask(q, data_dir=dd)}")

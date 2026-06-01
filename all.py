@@ -57,11 +57,7 @@ def start_backend():
     env = os.environ.copy()
     env["DATA_DIR"] = str(ROOT / "data")
     env.setdefault("OLLAMA_BASE_URL", "http://192.168.1.206:11434")
-<<<<<<< HEAD
     env.setdefault("OLLAMA_MODEL", "RogerBen/qwen3.5-35b-opus-distill:latest")
-=======
-    env.setdefault("OLLAMA_MODEL", "qwen3:30b")
->>>>>>> beb14c1332f889001101e643b18fcfda2885c8f6
 
     proc = subprocess.Popen(
         [

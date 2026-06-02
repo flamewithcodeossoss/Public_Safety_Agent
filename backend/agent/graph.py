@@ -73,11 +73,16 @@ class AgentState(TypedDict):
 # infinite generation loops from reasoning models.  This is the ONLY
 # reliable mechanism — stop sequences fire inside <think> blocks and
 # HTTP timeouts don't trigger when Ollama streams tokens slowly.
-#   - SQL generation: num_predict=512   (a SQL query is <200 tokens)
-#   - General LLM:    num_predict=1024  (JSON / NL answers are <500 tokens)
+#
+# IMPORTANT: Reasoning models (Qwen3-distill) spend 300-1500 tokens on
+# <think>...</think> BEFORE the actual output.  The cap must account for
+# think tokens + output tokens.  Setting it too low truncates the SQL,
+# silently dropping WHERE clauses / ORDER BY (causing wrong results).
+#   - SQL generation: num_predict=4096  (think ~1000 + SQL ~200)
+#   - General LLM:    num_predict=4096  (think ~1000 + answer ~500)
 
 
-def _get_llm(num_predict: int = 1024, **kwargs):
+def _get_llm(num_predict: int = 4096, **kwargs):
     """
     Returns a LangChain-compatible chat LLM with a hard token cap.
 
@@ -123,8 +128,8 @@ def _get_llm(num_predict: int = 1024, **kwargs):
 
 
 def _get_sql_llm():
-    """LLM for SQL generation — hard-capped at 512 tokens, no stop sequences."""
-    return _get_llm(num_predict=512)
+    """LLM for SQL generation — hard-capped at 4096 tokens (think + SQL)."""
+    return _get_llm(num_predict=4096)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -141,8 +146,9 @@ Available data domains:
 
 Return this exact JSON structure:
 {
-  "intent": "<latest|average|sum|min|max|trend|count_records|summary>",
+  "intent": "<latest|average|sum|min|max|trend|count_records|count_where|stddev|summary>",
   "location": "<extracted location, asset name, or domain name>",
+  "value_filter": <specific value to filter by if user asks "how many times was value X", else null>,
   "time_filter": {
     "type": "<latest|last_n|last_month|date_range|all>",
     "n": <number of hours if last_n, else null>,
@@ -156,9 +162,11 @@ Rules for intent:
 - intent=summary       → user says "summarize", "overview", "status report", OR asks about a whole domain (CCTV, gates, access control)
 - intent=trend         → user says "trend", "history", "over time", OR asks about a specific past date
 - intent=average       → user says "average", "mean", "typical"
-- intent=max           → user says "peak", "highest", "maximum"
+- intent=max           → user says "peak", "highest", "maximum", "absolute peak"
 - intent=min           → user says "lowest", "minimum"
-- intent=count_records → user says "how many readings", "how many records", "how many updates"
+- intent=count_records → user says "how many readings", "how many records", "how many updates", "how many data updates"
+- intent=count_where   → user asks "how many times value was X", "how many times recorded X" → set value_filter=X
+- intent=stddev        → user says "standard deviation", "std dev", "variance"
 
 Rules for location:
 - For single-sensor questions: extract the specific sensor name (e.g. "Beaches VIP", "disabled cameras")
@@ -178,12 +186,15 @@ Critical rules:
 - Return ONLY the JSON object. No explanation. No markdown."""
 
 def _strip_think(text: str) -> str:
-    """Remove <think>...</think> blocks emitted by Qwen 3.x thinking mode.
-    Also handles unclosed <think> tags (e.g. when output was truncated)."""
+    """Remove <think>...</think> blocks and special tokens from LLM output.
+    Handles: closed think blocks, unclosed think blocks (truncated output),
+    and leaked special tokens like <|endoftext|>, <|im_end|>, etc."""
     # First: remove properly closed <think>...</think> blocks
     text = re.sub(r"<think>[\s\S]*?</think>", "", text)
     # Safety net: remove unclosed <think> blocks (truncated by stop tokens / max tokens)
     text = re.sub(r"<think>[\s\S]*$", "", text)
+    # Strip special control tokens that leak in raw text generation
+    text = re.sub(r"<\|.*?\|>", "", text)
     return text.strip()
 
 
@@ -330,7 +341,19 @@ Tags: 'MRS_CCTV.cameras_total_number','MRS_CCTV.Total_enabled_cameras','MRS_CCTV
 SELECT TagName, Value, DateTime FROM hist WHERE TagName IN ('MRS_CCTV.cameras_total_number','MRS_CCTV.Total_enabled_cameras','MRS_CCTV.Total_disabled_cameras') AND Value IS NOT NULL AND (TagName, DateTime) IN (SELECT TagName, MAX(DateTime) FROM hist WHERE Value IS NOT NULL GROUP BY TagName);
 
 Tag: 'MRS_Access_Control.MainGate_Vip'  Intent: average  Time: {"type":"last_month"}
-SELECT AVG(Value) AS avg_value FROM hist WHERE TagName = 'MRS_Access_Control.MainGate_Vip' AND Value IS NOT NULL AND DateTime >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month' AND DateTime < date_trunc('month', CURRENT_DATE);"""
+SELECT AVG(Value) AS avg_value FROM hist WHERE TagName = 'MRS_Access_Control.MainGate_Vip' AND Value IS NOT NULL AND DateTime >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month' AND DateTime < date_trunc('month', CURRENT_DATE);
+
+Tag: 'MRS_CCTV.Total_disabled_cameras'  Intent: count_records  Time: {"type":"all"}  User asks: "how many times was value 0"
+SELECT COUNT(*) AS count_zero FROM hist WHERE TagName = 'MRS_CCTV.Total_disabled_cameras' AND Value = 0;
+
+Tag: 'MRS_Access_Control.MainGate_Vip'  Intent: max  Time: {"type":"all"}  User asks: "peak value and when"
+SELECT Value, DateTime FROM hist WHERE TagName = 'MRS_Access_Control.MainGate_Vip' AND Value IS NOT NULL ORDER BY Value DESC LIMIT 1;
+
+Tag: 'MRS_Access_Control.AccessChannels_QR'  Intent: count_records  Time: {"type":"date_range","start":"2026-05-19","end":"2026-05-19"}  User asks: "how many records on May 19"
+SELECT COUNT(*) AS record_count FROM hist WHERE TagName = 'MRS_Access_Control.AccessChannels_QR' AND Value IS NOT NULL AND CAST(DateTime AS DATE) = '2026-05-19';
+
+Tag: 'MRS_Access_Control.AccessChannels_QR'  Intent: stddev  Time: {"type":"all"}  User asks: "standard deviation"
+SELECT ROUND(STDDEV_POP(Value), 2) AS stddev_value FROM hist WHERE TagName = 'MRS_Access_Control.AccessChannels_QR' AND Value IS NOT NULL;"""
 
 
 def _build_sql_prompt(state: AgentState) -> str:
@@ -338,6 +361,7 @@ def _build_sql_prompt(state: AgentState) -> str:
     intent_info = state["extracted_intent"]
     intent = intent_info.get("intent", "latest")
     tf = intent_info.get("time_filter", {"type": "latest"})
+    value_filter = intent_info.get("value_filter")
     domain_tags = state.get("domain_tags", [])
 
     if domain_tags:
@@ -354,6 +378,13 @@ def _build_sql_prompt(state: AgentState) -> str:
             f"Intent: {intent}",
             f"Time: {json.dumps(tf)}",
         ]
+
+    # Include value_filter when user asks "how many times value was X"
+    if value_filter is not None:
+        parts.append(f"Value filter: Value = {value_filter}")
+
+    # Include original question for context on complex/ambiguous queries
+    parts.append(f"User question: {state['user_question']}")
 
     # Do NOT use conflicting /no_think hacks which confuse reasoning models
     return "\n".join(parts)
